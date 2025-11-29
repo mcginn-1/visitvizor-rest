@@ -1,0 +1,10 @@
+
+[
+  {
+    "origin": ["http://localhost:3000"],
+    "method": ["GET", "PUT", "HEAD", "OPTIONS"],
+    "responseHeader": ["Content-Type", "x-goog-meta-*"],
+    "maxAgeSeconds": 3600
+  }
+]
+

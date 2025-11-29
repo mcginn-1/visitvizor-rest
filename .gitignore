@@ -1,0 +1,47 @@
+give me a good gitignore for a go project
+Sign in
+AI Mode
+All
+Forums
+Short videos
+Videos
+Images
+Shopping
+More
+Tools
+AI Overview
+A .gitignore file for a Go project typically focuses on excluding compiled binaries, test artifacts, and editor/IDE-specific files.
+Here is a comprehensive .gitignore for a Go project:
+Code
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (vendor directory is often included in version control for Go projects,
+# but if you manage dependencies differently, you might uncomment this)
+# vendor/
+
+# Go module cache
+.gocache/
+
+# Build output directory (if you use a specific output directory like 'bin')
+bin/
+
+# IDE/Editor specific files
+.idea/
+.vscode/
+*.swp
+*.bak
+
+metadata_output.txt
+
