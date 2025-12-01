@@ -1,4 +1,3 @@
-
 package dicomweb
 
 import (
@@ -11,7 +10,6 @@ import (
 
 	healthcare "google.golang.org/api/healthcare/v1"
 )
-
 
 ////////////////////////////////////////////////////////////
 //
@@ -196,6 +194,55 @@ func (c *Client) RetrieveInstanceRaw(
 	resp, err := instancesSvc.RetrieveInstance(parent, dicomWebPath).Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("RetrieveInstance: %w", err)
+	}
+	return resp, nil
+}
+
+// RetrieveFramesRaw retrieves one or more frames' pixel data for a given
+// study/series/instance/frame list via the DICOMweb frames endpoint.
+//
+// It returns whatever the Healthcare API returns for this call, typically
+//
+//	Content-Type: multipart/related; type="application/octet-stream"; ...
+//
+// with parts of type application/octet-stream containing only PixelData bytes.
+//
+// The caller is responsible for closing resp.Body.
+func (c *Client) RetrieveFramesRaw(
+	ctx context.Context,
+	studyUID, seriesUID, instanceUID, frameList, accept string,
+) (*http.Response, error) {
+	if studyUID == "" || seriesUID == "" || instanceUID == "" || frameList == "" {
+		return nil, fmt.Errorf("studyUID, seriesUID, instanceUID, and frameList are required")
+	}
+
+	parent := c.dicomStoreParent()
+	dicomWebPath := fmt.Sprintf(
+		"studies/%s/series/%s/instances/%s/frames/%s",
+		studyUID, seriesUID, instanceUID, frameList,
+	)
+
+	framesSvc := c.svc.Projects.
+		Locations.
+		Datasets.
+		DicomStores.
+		Studies.
+		Series.
+		Instances.
+		Frames
+
+	call := framesSvc.RetrieveFrames(parent, dicomWebPath)
+
+	// Propagate the caller's Accept so OHIF's
+	//   Accept: multipart/related; type=application/octet-stream; transfer-syntax=*
+	// is honored by GCP.
+	if accept != "" {
+		call.Header().Set("Accept", accept)
+	}
+
+	resp, err := call.Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("RetrieveFrames: %w", err)
 	}
 	return resp, nil
 }

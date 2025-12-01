@@ -14,7 +14,7 @@ import (
 func withCORS(next http.Handler) http.Handler {
 	allowedOrigin := os.Getenv("CORS_ALLOWED_ORIGIN")
 	if allowedOrigin == "" {
-		allowedOrigin = "http://localhost:3000"
+		allowedOrigin = "*"
 	}
 	// If someone sets CORS_ALLOWED_ORIGIN to "localhost:3000" without scheme,
 	// normalize it so the browser sees an exact match to Origin.

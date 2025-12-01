@@ -55,6 +55,38 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// getUserIDFromRequest returns the effective user ID for this request.
+//
+// Priority:
+//  1. If X-User-Id header is set (non-empty), trust and return it.
+//     This is useful for local/dev flows and automated tests.
+//  2. Otherwise, require Authorization: Bearer <Firebase ID token>
+//     and verify it via Firebase Admin SDK.
+//
+// If no valid user can be determined, it returns an error.
+func (h *Handlers) GetUserIDFromRequest(ctx context.Context, r *http.Request) (string, error) {
+	// Dev/test override: X-User-Id short-circuits Firebase verification.
+	if userID := strings.TrimSpace(r.Header.Get("X-User-Id")); userID != "" {
+		return userID, nil
+	}
+
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Bearer ") {
+		return "", fmt.Errorf("missing Authorization bearer token")
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
+	if token == "" {
+		return "", fmt.Errorf("empty bearer token")
+	}
+
+	decoded, err := h.verifyIDToken(ctx, token)
+	if err != nil || decoded == nil {
+		return "", fmt.Errorf("verifyIDToken failed: %w", err)
+	}
+
+	return decoded.UID, nil
+}
+
 // LoginHandler implements POST /api/login.
 //
 // Behavior matches routes_auth.py:
@@ -326,24 +358,15 @@ func (h *Handlers) CreateProviderUploadTokenHandler(w http.ResponseWriter, r *ht
 		return
 	}
 
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"error": "Missing Authorization header",
-		})
-		return
-	}
-	tokenStr := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
 	ctx := r.Context()
-	decoded, err := h.verifyIDToken(ctx, tokenStr)
-	if err != nil || decoded == nil {
-		log.Printf("CreateProviderUploadToken verify token error: %v", err)
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("CreateProviderUploadTokenHandler getUserIDFromRequest error: %v", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "unauthorized",
 		})
 		return
 	}
-	userID := decoded.UID
 
 	var body struct {
 		PatientPhone  string `json:"patient_phone"`
@@ -850,26 +873,15 @@ func (h *Handlers) ListImagingStudiesHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"error": "Missing Authorization header",
-		})
-		return
-	}
-
-	token := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
 	ctx := r.Context()
-	decoded, err := h.verifyIDToken(ctx, token)
-	if err != nil || decoded == nil {
-		log.Printf("ListImagingStudies verify token error: %v", err)
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("ListImagingStudiesHandler getUserIDFromRequest error: %v", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "unauthorized",
 		})
 		return
 	}
-
-	userID := decoded.UID
 
 	studies, err := h.DB.ListImagingStudiesByUser(ctx, userID)
 	if err != nil {
@@ -947,26 +959,15 @@ func (h *Handlers) ImagingStudyByIDHandler(w http.ResponseWriter, r *http.Reques
 // handleImagingStudyJSON returns the ImagingStudy document as JSON after
 // verifying that the authenticated user owns it.
 func (h *Handlers) handleImagingStudyJSON(w http.ResponseWriter, r *http.Request, studyID string) {
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"error": "Missing Authorization header",
-		})
-		return
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
-
 	ctx := r.Context()
-	decoded, err := h.verifyIDToken(ctx, token)
-	if err != nil || decoded == nil {
-		log.Printf("ImagingStudyByID verify token error: %v", err)
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("handleImagingStudyJSON getUserIDFromRequest error: %v", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "unauthorized",
 		})
 		return
 	}
-
-	userID := decoded.UID
 
 	study, err := h.DB.GetImagingStudy(ctx, studyID)
 	if err != nil {
@@ -1008,25 +1009,15 @@ func (h *Handlers) handleImagingStudyDicomMetadata(w http.ResponseWriter, r *htt
 		return
 	}
 
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"error": "Missing Authorization header",
-		})
-		return
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
-
 	ctx := r.Context()
-	decoded, err := h.verifyIDToken(ctx, token)
-	if err != nil || decoded == nil {
-		log.Printf("handleImagingStudyDicomMetadata verify token error: %v", err)
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("handleImagingStudyDicomMetadata getUserIDFromRequest error: %v", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "unauthorized",
 		})
 		return
 	}
-	userID := decoded.UID
 
 	study, err := h.DB.GetImagingStudy(ctx, studyID)
 	if err != nil {
@@ -1070,25 +1061,15 @@ func (h *Handlers) handleImagingStudyDicomFrame(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"error": "Missing Authorization header",
-		})
-		return
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
-
 	ctx := r.Context()
-	decoded, err := h.verifyIDToken(ctx, token)
-	if err != nil || decoded == nil {
-		log.Printf("handleImagingStudyDicomFrame verify token error: %v", err)
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("handleImagingStudyDicomFrame getUserIDFromRequest error: %v", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "unauthorized",
 		})
 		return
 	}
-	userID := decoded.UID
 
 	study, err := h.DB.GetImagingStudy(ctx, studyID)
 	if err != nil {
@@ -1156,6 +1137,54 @@ func dicomwebTagString(ds map[string]interface{}, tag string) string {
 	return ""
 }
 
+// //////////////////////////////////////////////////////////
+//
+//	Extract orientation key for determining likeness in a series
+//	so we can throw out any that are far different than standard orientation
+//	for that series
+//
+// dicomwebOrientationKey extracts Image Orientation (Patient) (0020,0037)
+// from a DICOM JSON dataset as a normalized string key like
+// "1\0\0\0\1\0" so we can group by orientation.
+func dicomwebOrientationKey(ds map[string]interface{}) string {
+	v, ok := ds["00200037"]
+	if !ok {
+		return ""
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	raw, ok := m["Value"]
+	if !ok {
+		return ""
+	}
+
+	vals, ok := raw.([]interface{})
+	if !ok || len(vals) == 0 {
+		return ""
+	}
+
+	// Expect 6 numbers; normalize them into a simple string.
+	parts := make([]string, 0, len(vals))
+	for _, x := range vals {
+		switch t := x.(type) {
+		case string:
+			parts = append(parts, strings.TrimSpace(t))
+		case float64:
+			// Format floats in a stable way
+			parts = append(parts, fmt.Sprintf("%.6f", t))
+		default:
+			// ignore
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	// Join with a separator that won't appear in numbers.
+	return strings.Join(parts, "\\")
+}
+
 // DicomWebStudiesHandler implements a minimal subset of DICOMweb paths under
 // /api/dicomweb/studies/ for use by OHIF or other viewers. It supports:
 //   - GET /api/dicomweb/studies/{StudyInstanceUID}/series
@@ -1183,9 +1212,15 @@ func (h *Handlers) DicomWebStudiesHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	////////////////////////////////////////////////////
+	//
+	//     Handling the /studies call from OHIF
+	//
+	//
 	suffix := strings.Trim(strings.TrimPrefix(path, prefix), "/")
 	if suffix == "" {
-		w.WriteHeader(http.StatusNotFound)
+		h.handleDicomWebSearchStudies(w, r)
+		//w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
@@ -1198,25 +1233,15 @@ func (h *Handlers) DicomWebStudiesHandler(w http.ResponseWriter, r *http.Request
 	studyUID := parts[0]
 
 	// Auth + ownership check via Firestore ImagingStudy
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"error": "Missing Authorization header",
-		})
-		return
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
-
 	ctx := r.Context()
-	decoded, err := h.verifyIDToken(ctx, token)
-	if err != nil || decoded == nil {
-		log.Printf("DicomWebStudiesHandler verify token error: %v", err)
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("DicomWebStudiesHandler getUserIDFromRequest error: %v", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"error": "unauthorized",
 		})
 		return
 	}
-	userID := decoded.UID
 
 	// Ensure the requested StudyInstanceUID corresponds to a study owned by
 	// this user. We use Firestore as the source of truth for ownership.
@@ -1241,6 +1266,12 @@ func (h *Handlers) DicomWebStudiesHandler(w http.ResponseWriter, r *http.Request
 		h.handleDicomWebListSeries(w, r, studyUID)
 		return
 	}
+	if len(parts) == 4 && parts[1] == "series" && parts[3] == "metadata" {
+		// /api/dicomweb/studies/{StudyInstanceUID}/series/{SeriesInstanceUID}/metadata
+		seriesUID := parts[2]
+		h.handleDicomWebSeriesMetadata(w, r, studyUID, seriesUID)
+		return
+	}
 	if len(parts) == 4 && parts[2] != "" && parts[3] == "instances" {
 		// /api/dicomweb/studies/{StudyInstanceUID}/series/{SeriesInstanceUID}/instances
 		seriesUID := parts[2]
@@ -1259,6 +1290,46 @@ func (h *Handlers) DicomWebStudiesHandler(w http.ResponseWriter, r *http.Request
 		seriesUID := parts[2]
 		sopUID := parts[4]
 		h.handleDicomWebRetrieveInstance(w, r, studyUID, seriesUID, sopUID, true)
+		return
+	}
+
+	//////////////
+	// old /frames handler
+	//if len(parts) == 7 && parts[1] == "series" && parts[3] == "instances" && parts[5] == "frames" {
+	//	// /api/dicomweb/studies/{StudyInstanceUID}/series/{SeriesInstanceUID}/instances/{SOPInstanceUID}/frames/{frame}
+	//	// For now we ignore the specific frame number and return the full instance.
+	//	seriesUID := parts[2]
+	//	sopUID := parts[4]
+	//	h.handleDicomWebRetrieveInstance(w, r, studyUID, seriesUID, sopUID, false)
+	//	return
+	//}
+
+	//////////////////////////////////////////////////
+	//
+	//   handles /frames endpoint  - for returning single Dicom frames
+	//
+	//     /frames originally returned full dicom, which was wrong, needs to return multipart
+	//       this fixes that
+	//
+	//          Request headers like:
+	//
+	//           Response headers:
+	//             content-type: multipart/related;
+	//               boundary=d6c54d1f0a2b95e5c946e7a098460569c4590ac002bd35ddb4a287e9ab1c;
+	//               transfer-syntax=*; type="application/octet-stream"
+	//
+	//           Each multipart part is now:
+	//             Content-Type: application/octet-stream; transfer-syntax=1.2.840.10008.1.2.1
+	//           i.e. raw PixelData bytes, NOT application/dicom.
+	//
+	//
+	if len(parts) == 7 && parts[1] == "series" && parts[3] == "instances" && parts[5] == "frames" {
+		// /api/dicomweb/studies/{StudyInstanceUID}/series/{SeriesInstanceUID}/instances/{SOPInstanceUID}/frames/{frameList}
+		seriesUID := parts[2]
+		sopUID := parts[4]
+		frameList := parts[6] // usually "1", but could be "1,2,3"
+
+		h.handleDicomWebRetrieveFrames(w, r, studyUID, seriesUID, sopUID, frameList)
 		return
 	}
 
@@ -1298,9 +1369,9 @@ func (h *Handlers) handleDicomWebListSeries(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		modality := dicomwebTagString(ds, "00080060")      // Modality
-		desc := dicomwebTagString(ds, "0008103E")          // SeriesDescription
-		study := dicomwebTagString(ds, "0020000D")         // StudyInstanceUID
+		modality := dicomwebTagString(ds, "00080060") // Modality
+		desc := dicomwebTagString(ds, "0008103E")     // SeriesDescription
+		study := dicomwebTagString(ds, "0020000D")    // StudyInstanceUID
 		if study == "" {
 			study = studyUID
 		}
@@ -1331,6 +1402,95 @@ func (h *Handlers) handleDicomWebListSeries(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// ///////////////////////////////////////////////////////////////
+//
+//	Handle /studies
+//
+// handleDicomWebSearchStudies implements a minimal QIDO-RS /studies search.
+//
+// It currently supports only StudyInstanceUID as a filter and returns a single
+// DICOM JSON study object if the study exists and is owned by the caller.
+func (h *Handlers) handleDicomWebSearchStudies(w http.ResponseWriter, r *http.Request) {
+	// Auth header is required (same as other DICOMweb handlers)
+	ctx := r.Context()
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("DicomWebSearchStudiesHandler getUserIDFromRequest error: %v", err)
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	// For now we only support StudyInstanceUID as a QIDO filter
+	studyUID := r.URL.Query().Get("StudyInstanceUID")
+	studyUID = strings.TrimSpace(studyUID)
+	if studyUID == "" {
+		// No filter or unsupported filter: return empty result set
+		w.Header().Set("Content-Type", "application/dicom+json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("[]"))
+		return
+	}
+
+	// Enforce ownership via Firestore ImagingStudy
+	studyRec, err := h.DB.GetImagingStudyByStudyInstanceUID(ctx, studyUID)
+	if err != nil {
+		log.Printf("handleDicomWebSearchStudies GetImagingStudyByStudyInstanceUID error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "server_error",
+		})
+		return
+	}
+	if studyRec == nil || studyRec.UserID != userID {
+		// No visible studies for this user/filter
+		w.Header().Set("Content-Type", "application/dicom+json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("[]"))
+		return
+	}
+
+	// Build a minimal DICOM JSON study object.
+	// Tags OHIF typically cares about here:
+	// - 0020000D StudyInstanceUID
+	// - 00080020 StudyDate
+	// - 00080030 StudyTime (optional; we leave blank)
+	// - 00081030 StudyDescription
+	// - 00080060 ModalitiesInStudy
+	obj := map[string]interface{}{}
+
+	obj["0020000D"] = map[string]interface{}{
+		"vr":    "UI",
+		"Value": []string{studyRec.StudyInstanceUID},
+	}
+	if studyRec.StudyDate != "" {
+		obj["00080020"] = map[string]interface{}{
+			"vr":    "DA",
+			"Value": []string{studyRec.StudyDate},
+		}
+	}
+	if studyRec.StudyDescription != "" {
+		obj["00081030"] = map[string]interface{}{
+			"vr":    "LO",
+			"Value": []string{studyRec.StudyDescription},
+		}
+	}
+	if len(studyRec.ModalitiesInStudy) > 0 {
+		obj["00080060"] = map[string]interface{}{
+			"vr":    "CS",
+			"Value": studyRec.ModalitiesInStudy,
+		}
+	}
+
+	out := []map[string]interface{}{obj}
+
+	w.Header().Set("Content-Type", "application/dicom+json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(out); err != nil {
+		log.Printf("handleDicomWebSearchStudies encode error: %v", err)
+	}
+}
+
 // handleDicomWebListInstances returns a DICOM JSON array describing the
 // instances within the given StudyInstanceUID/SeriesInstanceUID, derived from
 // the study-level metadata.
@@ -1354,12 +1514,58 @@ func (h *Handlers) handleDicomWebListInstances(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	/////////////////////////////////////////
+	//
+	// 1) Determine dominant orientation for this SeriesInstanceUID.
+	//
+	//   Takes out any outliers based on orientation
+	//    such as those different orientated slides from our OHIF test
+	//    should all be same orientation after this
+	//
+	orientationCounts := make(map[string]int)
+	for _, ds := range datasets {
+		sUID := dicomwebTagString(ds, "0020000E") // SeriesInstanceUID
+		if sUID != seriesUID {
+			continue
+		}
+		key := dicomwebOrientationKey(ds)
+		if key == "" {
+			continue
+		}
+		orientationCounts[key]++
+	}
+	// Calculate the dominant orientation
+	dominantOrientation := ""
+	maxCount := 0
+	for key, count := range orientationCounts {
+		if count > maxCount {
+			maxCount = count
+			dominantOrientation = key
+		}
+	}
+
 	instances := make([]map[string]interface{}, 0)
 
 	for _, ds := range datasets {
 		sUID := dicomwebTagString(ds, "0020000E") // SeriesInstanceUID
 		if sUID != seriesUID {
 			continue
+		}
+
+		////////////////////////////////////////
+		//
+		//   Apply Dominant Orientation Filter
+		//
+		//    Should filter out any without the common orientation of
+		//     the dominant set of slides, such as
+		//     the first outliers we were seeing
+		//
+		if dominantOrientation != "" {
+			key := dicomwebOrientationKey(ds)
+			if key != "" && key != dominantOrientation {
+				// Skip orientation outliers
+				continue
+			}
 		}
 
 		studyVal := dicomwebTagString(ds, "0020000D") // StudyInstanceUID
@@ -1391,6 +1597,109 @@ func (h *Handlers) handleDicomWebListInstances(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(instances); err != nil {
 		log.Printf("handleDicomWebListInstances encode error: %v", err)
+	}
+}
+
+// handleDicomWebSeriesMetadata returns a DICOM JSON array of instance
+// metadata for a given StudyInstanceUID/SeriesInstanceUID.
+//
+// It reuses the study-level metadata from Google DICOMweb and filters
+// to only the instances in the requested series, then returns them as-is
+// (DICOM JSON datasets) so OHIF can build display sets.
+func (h *Handlers) handleDicomWebSeriesMetadata(
+	w http.ResponseWriter,
+	r *http.Request,
+	studyUID string,
+	seriesUID string,
+) {
+	ctx := r.Context()
+
+	// Fetch study-level metadata from Google Healthcare
+	bytes, err := h.Dicom.StudyMetadataJSON(ctx, studyUID)
+	if err != nil {
+		log.Printf("handleDicomWebSeriesMetadata StudyMetadataJSON error: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+			"error": "dicom_metadata_error",
+		})
+		return
+	}
+
+	var datasets []map[string]interface{}
+	if err := json.Unmarshal(bytes, &datasets); err != nil {
+		log.Printf("handleDicomWebSeriesMetadata unmarshal error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "invalid_dicom_metadata",
+		})
+		return
+	}
+
+	/////////////////////////////////////////
+	//
+	// 1) Determine dominant orientation for this SeriesInstanceUID.
+	//
+	//   Takes out any outliers based on orientation
+	//    such as those different orientated slides from our OHIF test
+	//    should all be same orientation after this
+	//
+	orientationCounts := make(map[string]int)
+	for _, ds := range datasets {
+		sUID := dicomwebTagString(ds, "0020000E") // SeriesInstanceUID
+		if sUID != seriesUID {
+			continue
+		}
+		key := dicomwebOrientationKey(ds)
+		if key == "" {
+			continue
+		}
+		orientationCounts[key]++
+	}
+	// Calculate the dominant orientation
+	dominantOrientation := ""
+	maxCount := 0
+	for key, count := range orientationCounts {
+		if count > maxCount {
+			maxCount = count
+			dominantOrientation = key
+		}
+	}
+	//
+	//
+	////////////////////   END dominant orientation filtering  ////////////////////
+
+	// Filter to only instances in the requested series
+	filtered := make([]map[string]interface{}, 0, len(datasets))
+	for _, ds := range datasets {
+		sUID := dicomwebTagString(ds, "0020000E") // SeriesInstanceUID
+
+		////////////////////////////////////////
+		//
+		//   Apply Dominant Orientation Filter
+		//
+		//    Should filter out any without the common orientation of
+		//     the dominant set of slides, such as
+		//     the first outliers we were seeing
+		//
+		if dominantOrientation != "" {
+			key := dicomwebOrientationKey(ds)
+			if key != "" && key != dominantOrientation {
+				// Skip orientation outliers
+				continue
+			}
+		}
+		//
+		/////////////////////////////////////////////
+
+		if sUID == seriesUID {
+			filtered = append(filtered, ds)
+		}
+
+	}
+
+	// Return DICOM JSON; OHIF sends Accept: application/dicom+json
+	w.Header().Set("Content-Type", "application/dicom+json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(filtered); err != nil {
+		log.Printf("handleDicomWebSeriesMetadata encode error: %v", err)
 	}
 }
 
@@ -1442,5 +1751,63 @@ func (h *Handlers) handleDicomWebRetrieveInstance(w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		log.Printf("handleDicomWebRetrieveInstance io.Copy error: %v", err)
+	}
+}
+
+// //////////////////////////////////////////////////////////
+//
+//	Handle Dicom Web Retreive Frames
+//
+//	 Fixes issues with returning pure Dicom - this should return multipart
+//	  for the individual frame calls, that were returning split images in OHIF
+//
+// handleDicomWebRetrieveFrames proxies a DICOMweb frames retrieval for a
+// single instance. It returns pixel data only (application/octet-stream),
+// not a full application/dicom instance.
+func (h *Handlers) handleDicomWebRetrieveFrames(
+	w http.ResponseWriter,
+	r *http.Request,
+	studyUID, seriesUID, sopUID, frameList string,
+) {
+	if h.Dicom == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "dicom_client_not_configured",
+		})
+		return
+	}
+
+	ctx := r.Context()
+
+	// Forward the Accept header so GCP returns what OHIF asked for.
+	accept := r.Header.Get("Accept")
+
+	resp, err := h.Dicom.RetrieveFramesRaw(ctx, studyUID, seriesUID, sopUID, frameList, accept)
+	if err != nil {
+		log.Printf("handleDicomWebRetrieveFrames error: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+			"error": "dicom_frames_error",
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		log.Printf("handleDicomWebRetrieveFrames upstream status %d %s", resp.StatusCode, resp.Status)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	// Pass through upstream Content-Type and Content-Length so boundary etc. are preserved.
+	for k, values := range resp.Header {
+		if strings.EqualFold(k, "Content-Type") || strings.EqualFold(k, "Content-Length") {
+			for _, v := range values {
+				w.Header().Add(k, v)
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("handleDicomWebRetrieveFrames io.Copy error: %v", err)
 	}
 }
