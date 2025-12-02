@@ -45,3 +45,6 @@ bin/
 
 metadata_output.txt
 
+testdata/dicomweb_frame1.bin
+testdata/dicomweb_frame1.dcm
+testdata/imaging_frame1.bin

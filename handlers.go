@@ -745,7 +745,7 @@ func (h *Handlers) ProviderUploadURLHandler(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Optional: enforce that only provider-created sessions can use this.
-	if sess.CreatedBy != "provider" {
+	if sess.CreatedBy != "provider" && sess.CreatedBy != "user" {
 		writeJSON(w, http.StatusForbidden, map[string]interface{}{
 			"error": "forbidden_for_this_session",
 		})
@@ -810,6 +810,72 @@ func (h *Handlers) ProviderUploadURLHandler(w http.ResponseWriter, r *http.Reque
 		"uploadUrl": signedURL,
 		"gsPath":    gsPath,
 		"uploadId":  objectPath, // can serve as a per-file ID
+	})
+}
+
+// ///////////////////////////////////////////
+//
+//	User Create Upload Session
+//
+// UserCreateUploadSessionHandler implements
+// POST /api/imaging/user/upload-sessions for logged-in user to
+// start an imaging upload without a code or phone number.
+func (h *Handlers) UserCreateUploadSessionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+	userID, err := h.GetUserIDFromRequest(ctx, r)
+	if err != nil {
+		log.Printf("UserCreateUploadSessionHandler getUserIDFromRequest error: %v", err)
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	// Optional: allow basic metadata from the user, but everything is optional.
+	var body struct {
+		Modality    string `json:"modality"`
+		Description string `json:"description"`
+		StudyDate   string `json:"study_date"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // ignore errors, all fields optional
+
+	sessionID, err := randomTokenID("SESS", 10)
+	if err != nil {
+		log.Printf("UserCreateUploadSession randomTokenID error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "server_error",
+		})
+		return
+	}
+
+	now := time.Now().UTC()
+	sess := &UploadSession{
+		SessionID: sessionID,
+		UserID:    userID,
+		CreatedBy: "user",
+		Status:    "pending",
+		GCSURI:    "",
+		GCSPrefix: "",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := h.DB.CreateUploadSession(ctx, sess); err != nil {
+		log.Printf("UserCreateUploadSession CreateUploadSession error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "server_error",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":         true,
+		"session_id": sessionID,
 	})
 }
 
@@ -1432,6 +1498,12 @@ func (h *Handlers) handleDicomWebSearchStudies(w http.ResponseWriter, r *http.Re
 		w.Write([]byte("[]"))
 		return
 	}
+
+	//if studyUID == "" {
+	//	studies, err := h.DB.ListImagingStudiesByUser(ctx, userID)
+	//	// convert each ImagingStudy to a DICOM JSON study object (like you already do for the one-study case)
+	//	// and return them as a [] of DICOM JSON datasets
+	//}
 
 	// Enforce ownership via Firestore ImagingStudy
 	studyRec, err := h.DB.GetImagingStudyByStudyInstanceUID(ctx, studyUID)

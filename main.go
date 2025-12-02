@@ -83,6 +83,11 @@ func main() {
 	mux.HandleFunc("/api/imaging/studies", h.ListImagingStudiesHandler)
 	mux.HandleFunc("/api/imaging/studies/", h.ImagingStudyByIDHandler)
 
+	// Longitudinal (scan-over-time) endpoints
+	mux.HandleFunc("/api/imaging/longitudinal/index", h.LongitudinalIndexHandler)
+	mux.HandleFunc("/api/imaging/longitudinal/index-status", h.LongitudinalIndexStatusHandler)
+	mux.HandleFunc("/api/imaging/longitudinal/resolve-point", h.LongitudinalResolvePointHandler)
+
 	// Minimal DICOMweb-style proxy for OHIF / other viewers
 	mux.HandleFunc("/api/dicomweb/studies/", h.DicomWebStudiesHandler)
 
@@ -91,9 +96,19 @@ func main() {
 	// Get upload session object
 	mux.HandleFunc("/api/imaging/provider/upload-sessions/", h.ProviderGetUploadSessionHandler)
 
+	//mux.HandleFunc("/api/imaging/provider/upload-sessions/", h.ProviderGetUploadSessionHandler)
+
+	// Obtains upload-url for gcs bucket upload session
+	mux.HandleFunc("/api/imaging/upload-url", h.ProviderUploadURLHandler)
+
+	mux.HandleFunc("/api/imaging/user/upload-sessions", h.UserCreateUploadSessionHandler)
+
+	//// Indexing for point-over-time
+	//mux.HandleFunc("/api/imaging/longitudinal/index", h.LongitudinalIndexHandler)
+	//mux.HandleFunc("/api/imaging/longitudinal/index-status", h.LongitudinalIndexStatusHandler)
+
 	//// Internal Pub/Sub endpoint for DICOM ingest worker
 	//mux.HandleFunc("/internal/pubsub/dicom-ingest", h.PubSubDicomIngestHandler)
-
 
 	addr := ":8080"
 	server := &http.Server{
