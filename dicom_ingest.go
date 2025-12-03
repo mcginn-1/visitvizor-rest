@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -17,10 +18,11 @@ import (
 	_ "github.com/suyashkumar/dicom/pkg/frame" // not used
 	"github.com/suyashkumar/dicom/pkg/tag"
 
+	"google.golang.org/api/googleapi"
 	healthcare "google.golang.org/api/healthcare/v1"
 )
-	//"github.com/suyashkumar/dicom/pkg/frame"
 
+//"github.com/suyashkumar/dicom/pkg/frame"
 
 //	healthcare "google.golang.org/api/healthcare/v1"
 //)
@@ -29,10 +31,11 @@ import (
 // It identifies the upload session and the GCS prefix to import from.
 //
 // Example JSON:
-// {
-//   "session_id": "SESS-ABC123",
-//   "gcs_prefix": "gs://vv-storage-vault/<userId>/SESS-ABC123/"
-// }
+//
+//	{
+//	  "session_id": "SESS-ABC123",
+//	  "gcs_prefix": "gs://vv-storage-vault/<userId>/SESS-ABC123/"
+//	}
 type IngestMessage struct {
 	SessionID string `json:"session_id"`
 	GCSPrefix string `json:"gcs_prefix"`
@@ -109,6 +112,82 @@ func (di *DicomIngester) ImportAllFromPrefix(ctx context.Context, gcsPrefix stri
 	return op.Name, nil
 }
 
+// summarizeStatusDetails separates duplicate/AlreadyExists style errors from other failures.
+func summarizeStatusDetails(details []googleapi.RawMessage) (dupMsgs []string, otherMsgs []string) {
+	for _, raw := range details {
+		var detail interface{}
+		if err := json.Unmarshal(raw, &detail); err != nil {
+			otherMsgs = append(otherMsgs, string(raw))
+			continue
+		}
+
+		msg := extractDetailMessage(detail)
+		if msg == "" {
+			msg = string(raw)
+		}
+
+		if isDuplicateDetail(detail, msg) {
+			dupMsgs = append(dupMsgs, msg)
+			continue
+		}
+		otherMsgs = append(otherMsgs, msg)
+	}
+	return dupMsgs, otherMsgs
+}
+
+func extractDetailMessage(detail interface{}) string {
+	switch v := detail.(type) {
+	case map[string]interface{}:
+		if msg, ok := v["message"].(string); ok {
+			return msg
+		}
+		if msg, ok := v["status"].(string); ok {
+			return msg
+		}
+	case string:
+		return v
+	}
+
+	b, err := json.Marshal(detail)
+	if err == nil {
+		return string(b)
+	}
+	return ""
+}
+
+func isDuplicateDetail(detail interface{}, msg string) bool {
+	msgLower := strings.ToLower(msg)
+	if strings.Contains(msgLower, "already exists") ||
+		strings.Contains(msgLower, "already imported") ||
+		strings.Contains(msgLower, "already there") ||
+		strings.Contains(msgLower, "duplicate") {
+		return true
+	}
+
+	if m, ok := detail.(map[string]interface{}); ok {
+		if code, ok := m["code"].(float64); ok && int64(code) == 6 {
+			// google.rpc.Code ALREADY_EXISTS
+			return true
+		}
+		if status, ok := m["status"].(string); ok && strings.EqualFold(status, "ALREADY_EXISTS") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func indentJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		return string(raw)
+	}
+	return buf.String()
+}
+
 // WaitForOperation polls the given long-running operation until completion or context cancel.
 func (di *DicomIngester) WaitForOperation(ctx context.Context, opName string) error {
 	ops := di.service.Projects.Locations.Datasets.Operations
@@ -133,9 +212,35 @@ func (di *DicomIngester) WaitForOperation(ctx context.Context, opName string) er
 			log.Printf("WaitForOperation: op=%s done=%v", op.Name, op.Done)
 
 			if op.Done {
-				if op.Error != nil && op.Error.Message != "" {
-					log.Printf("WaitForOperation: op %s failed: %s", opName, op.Error.Message)
-					return fmt.Errorf("dicom import failed: %s", op.Error.Message)
+				if op.Error != nil {
+					dupMsgs, otherMsgs := summarizeStatusDetails(op.Error.Details)
+					code := op.Error.Code
+					msg := op.Error.Message
+
+					if meta := indentJSON(json.RawMessage(op.Metadata)); meta != "" {
+						log.Printf("WaitForOperation: op %s metadata: %s", opName, meta)
+					}
+					if len(op.Error.Details) > 0 {
+						if detailsJSON, err := json.MarshalIndent(op.Error.Details, "", "  "); err == nil {
+							log.Printf("WaitForOperation: op %s error details: %s", opName, string(detailsJSON))
+						}
+					}
+
+					// If everything is duplicate/already_exists, treat as success (idempotent).
+					if len(otherMsgs) == 0 && (len(dupMsgs) > 0 || code == 6 || strings.Contains(strings.ToLower(msg), "already exists")) {
+						preview := msg
+						if len(dupMsgs) > 0 {
+							preview = dupMsgs[0]
+						}
+						if len(preview) > 300 {
+							preview = preview[:300] + "..."
+						}
+						log.Printf("WaitForOperation: op %s had duplicate/exists errors only (code=%d), treating as success. First duplicate: %s", opName, code, preview)
+						return nil
+					}
+
+					log.Printf("WaitForOperation: op %s failed: %s (code=%d duplicates=%d other_errors=%d)", opName, msg, code, len(dupMsgs), len(otherMsgs))
+					return fmt.Errorf("dicom import failed: %s (code=%d duplicates=%d other_errors=%d)", msg, code, len(dupMsgs), len(otherMsgs))
 				}
 
 				log.Printf("WaitForOperation: op %s completed successfully", opName)
@@ -144,7 +249,6 @@ func (di *DicomIngester) WaitForOperation(ctx context.Context, opName string) er
 		}
 	}
 }
-
 
 //// WaitForOperation polls the given long-running operation until completion or context cancel.
 //func (di *DicomIngester) WaitForOperation(ctx context.Context, opName string) error {
@@ -277,36 +381,37 @@ func looksLikeDicomObjectName(name string) bool {
 	if strings.HasSuffix(name, ".dcm") || strings.HasSuffix(name, ".dicom") {
 		return true
 	}
-	// Many PACS exports omit extensions; treat them as candidates.
-	if !strings.Contains(name, ".") {
-		return true
-	}
-	// Skip common non-DICOM extensions.
+	// Skip obvious non-DICOM extensions.
 	if strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".pdf") ||
 		strings.HasSuffix(name, ".csv") || strings.HasSuffix(name, ".json") ||
-		strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".zip") {
+		strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".zip") ||
+		strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".html") ||
+		strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".png") ||
+		strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") ||
+		strings.HasSuffix(name, ".gif") || strings.HasSuffix(name, ".mp4") ||
+		strings.HasSuffix(name, ".mov") {
 		return false
 	}
-	return false
+	// Allow names with dots (SOP Instance UIDs) even without extensions.
+	return true
 }
 
-//////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////
 //
-//   SCAN DICOM INSTANCES in GCS bucket that were just uploaded
+//	  SCAN DICOM INSTANCES in GCS bucket that were just uploaded
 //
-//   Build DICOM Instance Info
+//	  Build DICOM Instance Info
 //
-//     Returns a map of [string /* always studyId */][]dicomInstanceInfo
+//	    Returns a map of [string /* always studyId */][]dicomInstanceInfo
 //
-//			type dicomInstanceInfo struct {
-//				StudyInstanceUID  string
-//				SeriesInstanceUID string
-//				SOPInstanceUID    string
-//				Modality          string
-//				StudyDate         string
-//				StudyDescription  string
-//			}
-//
+//				type dicomInstanceInfo struct {
+//					StudyInstanceUID  string
+//					SeriesInstanceUID string
+//					SOPInstanceUID    string
+//					Modality          string
+//					StudyDate         string
+//					StudyDescription  string
+//				}
 //
 // collectDicomInstances scans all objects under the given GCS prefix and
 // returns a map keyed by StudyInstanceUID with the per-instance header info.
@@ -332,6 +437,9 @@ func (h *Handlers) collectDicomInstances(ctx context.Context, gcsPrefix string) 
 
 	it := h.Storage.Bucket(bucketName).Objects(ctx, &storage.Query{Prefix: objectPrefix})
 
+	var totalObjects, candidateObjects, parsedObjects, parseErrors int
+	var skippedSamples []string
+
 	for {
 		attrs, err := it.Next()
 		if err == iterator.Done {
@@ -340,30 +448,41 @@ func (h *Handlers) collectDicomInstances(ctx context.Context, gcsPrefix string) 
 		if err != nil {
 			return nil, fmt.Errorf("iterate GCS objects under %s: %w", gcsPrefix, err)
 		}
+		totalObjects++
 
 		if !looksLikeDicomObjectName(attrs.Name) {
+			if len(skippedSamples) < 5 {
+				skippedSamples = append(skippedSamples, attrs.Name)
+			}
 			continue
 		}
+		candidateObjects++
 
 		rc, err := h.Storage.Bucket(bucketName).Object(attrs.Name).NewReader(ctx)
 		if err != nil {
-			// handle
+			log.Printf("collectDicomInstances: open %s: %v", attrs.Name, err)
+			continue
 		}
-		defer rc.Close()
 
 		ds, err := dicom.Parse(rc, attrs.Size, nil, dicom.SkipPixelData())
+		closeErr := rc.Close()
 		if err != nil {
+			parseErrors++
 			log.Printf("collectDicomInstances: Parse(%s): %v", attrs.Name, err)
 			continue
 		}
+		if closeErr != nil {
+			log.Printf("collectDicomInstances: close(%s): %v", attrs.Name, closeErr)
+		}
+		parsedObjects++
 
 		// ds is a dicom.Dataset value; pass pointer into your helper:
 		studyUID := getStringByTag(&ds, tag.StudyInstanceUID)
 		seriesUID := getStringByTag(&ds, tag.SeriesInstanceUID)
-		sopUID   := getStringByTag(&ds, tag.SOPInstanceUID)
+		sopUID := getStringByTag(&ds, tag.SOPInstanceUID)
 		modality := getStringByTag(&ds, tag.Modality)
 		studyDate := getStringByTag(&ds, tag.StudyDate)
-		desc      := getStringByTag(&ds, tag.StudyDescription)
+		desc := getStringByTag(&ds, tag.StudyDescription)
 
 		//// Open the object and parse just the header (drop pixel data).
 		//rc, err := h.Storage.Bucket(bucketName).Object(attrs.Name).NewReader(ctx)
@@ -404,32 +523,36 @@ func (h *Handlers) collectDicomInstances(ctx context.Context, gcsPrefix string) 
 		studies[studyUID] = append(studies[studyUID], info)
 	}
 
+	log.Printf("collectDicomInstances: scanned bucket=%s prefix=%s total=%d candidates=%d parsed=%d parseErrors=%d studies=%d", bucketName, objectPrefix, totalObjects, candidateObjects, parsedObjects, parseErrors, len(studies))
+	if candidateObjects == 0 && len(skippedSamples) > 0 {
+		log.Printf("collectDicomInstances: sample skipped objects (treated as non-DICOM): %v", skippedSamples)
+	}
+
 	return studies, nil
 }
 
-////////////////////////////////////////////////////////////////////////
+// //////////////////////////////////////////////////////////////////////
 //
-//     Takes a flat header scan result from all the files 
+//	    Takes a flat header scan result from all the files
 //
-//       a map of [string /* always studyId */][]dicomInstanceInfo
+//	      a map of [string /* always studyId */][]dicomInstanceInfo
 //
-//       and rolls up the data by StudyID, with multiple Series and Modalities
+//	      and rolls up the data by StudyID, with multiple Series and Modalities
 //
-//       study := &ImagingStudy{
-//			StudyID:            studyID,
-//			UserID:             sess.UserID,
-//			SessionID:          sess.SessionID,
-//			StudyInstanceUID:   studyUID,
-//			SeriesInstanceUIDs: seriesUIDs,
-//			ModalitiesInStudy:  modalities,
-//			StudyDate:          studyDate,
-//			StudyDescription:   studyDescription,
-//			NumInstances:       len(instances),
-//			GCSPrefix:          gcsPrefix,
-//			DicomStorePath:     dicomStorePath,
-//			CreatedAt:          time.Now().UTC(),
-//		}
-//
+//	      study := &ImagingStudy{
+//				StudyID:            studyID,
+//				UserID:             sess.UserID,
+//				SessionID:          sess.SessionID,
+//				StudyInstanceUID:   studyUID,
+//				SeriesInstanceUIDs: seriesUIDs,
+//				ModalitiesInStudy:  modalities,
+//				StudyDate:          studyDate,
+//				StudyDescription:   studyDescription,
+//				NumInstances:       len(instances),
+//				GCSPrefix:          gcsPrefix,
+//				DicomStorePath:     dicomStorePath,
+//				CreatedAt:          time.Now().UTC(),
+//			}
 //
 // createImagingStudiesFromInstances groups instances by StudyInstanceUID and
 // writes one ImagingStudy document per study.
@@ -513,10 +636,7 @@ func (h *Handlers) createImagingStudiesFromInstances(ctx context.Context, sess *
 // - group instances into ImagingStudy docs
 // - set status to ready or error accordingly.
 //
-//
-//     THIS IS THE MAIN INGESTION POINT INTO GOOGLE DICOM STORE
-//
-//
+//	THIS IS THE MAIN INGESTION POINT INTO GOOGLE DICOM STORE
 func (h *Handlers) handleIngestMessage(ctx context.Context, msg IngestMessage) error {
 	if strings.TrimSpace(msg.SessionID) == "" || strings.TrimSpace(msg.GCSPrefix) == "" {
 		return fmt.Errorf("missing session_id or gcs_prefix in message")
@@ -533,10 +653,10 @@ func (h *Handlers) handleIngestMessage(ctx context.Context, msg IngestMessage) e
 
 	// Mark as importing and store GCS prefix (and clear any previous error).
 	if err := h.DB.UpdateUploadSessionStatus(ctx, msg.SessionID, map[string]interface{}{
-		"status":                  "importing",
-		"error_message":           "",
-		"gcs_prefix":              msg.GCSPrefix,
-		"dicom_import_operation":  "",
+		"status":                 "importing",
+		"error_message":          "",
+		"gcs_prefix":             msg.GCSPrefix,
+		"dicom_import_operation": "",
 	}); err != nil {
 		return fmt.Errorf("UpdateUploadSessionStatus(importing): %w", err)
 	}
@@ -601,10 +721,10 @@ func (h *Handlers) handleIngestMessage(ctx context.Context, msg IngestMessage) e
 		})
 		return err
 	}
-	
+
 	////////////////////////////////////////////////////////////////////////
 	//
-	//     Takes a flat header scan result from all the files 
+	//     Takes a flat header scan result from all the files
 	//
 	//       a map of [string /* always studyId */][]dicomInstanceInfo
 	//

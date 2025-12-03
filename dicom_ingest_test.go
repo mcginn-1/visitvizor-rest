@@ -74,9 +74,9 @@ func Test_ManualPubSubDicomIngest(t *testing.T) {
 		//testSessionID = "REPLACE_WITH_SESSION_ID"
 		//testGCSPrefix = "gs://vv-storage-vault/REPLACE_WITH_USER_ID/REPLACE_WITH_SESSION_ID/"
 		//testSessionID = "SESS-CI2TKOLH"
-		testSessionID = "SESS-GOVT5MBW"
+		testSessionID = "SESS-LX3LY45F"
 		//testGCSPrefix = "gs://vv-storage-vault/SlM7A6UIqUUOdukWJrRJdQFh6eX2/SESS-CI2TKOLH"
-		testGCSPrefix = "gs://vv-storage-vault/VaDLbMeAPFUiG0R7CMl35jE87e83/SESS-GOVT5MBW/"
+		testGCSPrefix = "gs://vv-storage-vault/VaDLbMeAPFUiG0R7CMl35jE87e83/SESS-LX3LY45F/"
 
 		// URL for the locally running REST server.
 		testURL = "http://localhost:8080/internal/pubsub/dicom-ingest"
